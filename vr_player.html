@@ -1,0 +1,383 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="UTF-8">
+<title>VR SBS Player</title>
+<style>
+* { margin: 0; padding: 0; box-sizing: border-box; }
+body { background: #000; color: #eee; font-family: system-ui, sans-serif; height: 100vh; overflow: hidden; position: relative; }
+
+#topbar {
+  position: absolute; top: 0; left: 0; right: 0; z-index: 10;
+  display: flex; align-items: center; gap: 12px; padding: 10px 16px;
+  background: linear-gradient(to bottom, rgba(0,0,0,0.75) 0%, rgba(0,0,0,0) 100%);
+  flex-wrap: wrap;
+}
+#topbar label { font-size: 13px; color: #aaa; }
+#topbar input[type=file] { font-size: 13px; color: #ccc; }
+#topbar input[type=range] { accent-color: #6c8ef5; }
+#topbar span { font-size: 13px; min-width: 28px; color: #ccc; }
+button {
+  padding: 5px 14px; font-size: 13px; border-radius: 6px;
+  background: #2a2a2a; color: #eee; border: 1px solid #3a3a3a; cursor: pointer;
+}
+button:hover { background: #333; }
+button.active { background: #4a5fc1; border-color: #6c8ef5; }
+
+#wrap { position: absolute; inset: 0; background: #000; }
+canvas { display: block; width: 100%; height: 100%; cursor: grab; }
+canvas:active { cursor: grabbing; }
+
+#hint {
+  position: absolute; top: 50%; left: 50%; transform: translate(-50%,-50%);
+  background: rgba(0,0,0,0.65); border: 1px solid #333; border-radius: 10px;
+  padding: 1.2rem 2rem; text-align: center; pointer-events: none; backdrop-filter: blur(4px);
+}
+#hint p { font-size: 15px; margin-bottom: 6px; }
+#hint small { font-size: 12px; color: #888; }
+
+#overlay {
+  position: absolute; bottom: 14px; left: 50%; transform: translateX(-50%);
+  display: flex; align-items: center; gap: 8px;
+}
+#progressWrap {
+  width: 320px; height: 6px; background: rgba(255,255,255,0.15); border-radius: 3px;
+  cursor: pointer; position: relative;
+}
+#progressWrap:hover { height: 8px; }
+#progressBar { height: 100%; background: #6c8ef5; width: 0%; border-radius: 3px; pointer-events: none; }
+#timeLabel { font-size: 12px; color: #aaa; white-space: nowrap; }
+
+#seekFlash {
+  position: absolute; top: 50%; left: 50%; transform: translate(-50%,-50%);
+  background: rgba(0,0,0,0.6); color: #fff; font-size: 18px; font-weight: 500;
+  padding: 8px 20px; border-radius: 8px; pointer-events: none;
+  opacity: 0; transition: opacity 0.2s;
+}
+
+#info {
+  position: absolute; top: 10px; right: 14px; font-size: 12px; color: rgba(255,255,255,0.35);
+  pointer-events: none; text-align: right; line-height: 1.6;
+}
+
+body.hide-ui #topbar { opacity: 0; pointer-events: none; }
+body.hide-ui #overlay { opacity: 0; pointer-events: none; }
+body.hide-ui #info { opacity: 0; }
+body.hide-ui canvas { cursor: none; }
+#topbar, #overlay, #info { transition: opacity 0.5s ease; }
+</style>
+</head>
+<body>
+
+<div id="topbar">
+  <label>Видео:</label>
+  <input type="file" id="fileInput" accept="video/*">
+
+  <button id="playBtn" disabled>▶ Играть</button>
+
+  <label>Режим:</label>
+  <button id="sbsBtn" class="active" title="Side-by-Side — берёт только левую половину">SBS (левая)</button>
+  <button id="fullBtn" title="Обычное 360° видео без SBS">Обычное 360°</button>
+
+  <label style="margin-left:8px;">FOV:</label>
+  <input type="range" id="fovSlider" min="40" max="120" value="75" style="width:90px">
+  <span id="fovVal">75°</span>
+
+  <label style="margin-left:8px;">Чувствит.:</label>
+  <input type="range" id="sensSlider" min="1" max="20" value="5" style="width:80px">
+  <span id="sensVal">5</span>
+
+  <button id="fsBtn" style="margin-left:auto;">⛶ Полный экран</button>
+
+  <label style="margin-left:8px; color:#aaa; font-size:13px;">Качество:</label>
+  <button id="lowBtn" onclick="applyQuality('low')">Низкое</button>
+  <button id="medBtn" onclick="applyQuality('medium')">Среднее</button>
+  <button id="highBtn" class="active" onclick="applyQuality('high')">Высокое</button>
+</div>
+
+<div id="wrap">
+  <canvas id="glCanvas"></canvas>
+
+  <div id="hint">
+    <p>Загрузи 360° VR видео</p>
+    <small>Поддерживается SBS (Side-by-Side) и обычное 360°<br>Управление: мышь / тачпад / тач</small>
+  </div>
+
+  <div id="overlay">
+    <div id="progressWrap"><div id="progressBar"></div></div>
+    <span id="timeLabel">0:00 / 0:00</span>
+  </div>
+
+  <div id="seekFlash"></div>
+
+  <div id="info">Мышь — обзор &nbsp;|&nbsp; Колёсико — зум<br>← → 5с &nbsp;|&nbsp; J K 10с &nbsp;|&nbsp; Клик по полосе — перемотка</div>
+</div>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+<script>
+const canvas = document.getElementById('glCanvas');
+const wrap = document.getElementById('wrap');
+
+const renderer = new THREE.WebGLRenderer({ canvas, antialias: true, powerPreference: 'high-performance' });
+
+const scene = new THREE.Scene();
+const camera = new THREE.PerspectiveCamera(75, 1, 0.1, 1000);
+
+let lon = 0, lat = 0;
+let isDragging = false, lastX = 0, lastY = 0;
+let sensitivity = 0.5;
+let isSBS = true;
+let videoEl = null, sphere = null;
+let quality = 'high';
+
+const qualityPresets = {
+  low:    { dpr: 1,   segments: 64,  aniso: 1 },
+  medium: { dpr: Math.min(window.devicePixelRatio, 2), segments: 96,  aniso: 4 },
+  high:   { dpr: Math.min(window.devicePixelRatio * 1.5, 3), segments: 128, aniso: 16 },
+};
+
+function applyQuality(q) {
+  quality = q;
+  const p = qualityPresets[q];
+  renderer.setPixelRatio(p.dpr);
+  resize();
+  if (videoEl) buildSphere(videoEl, isSBS);
+  ['lowBtn','medBtn','highBtn'].forEach(id => document.getElementById(id).classList.remove('active'));
+  document.getElementById({low:'lowBtn',medium:'medBtn',high:'highBtn'}[q]).classList.add('active');
+}
+
+const progressBar = document.getElementById('progressBar');
+const timeLabel = document.getElementById('timeLabel');
+let lastTimeSec = -1;
+
+function resize() {
+  const w = wrap.clientWidth, h = wrap.clientHeight;
+  renderer.setSize(w, h, false);
+  camera.aspect = w / h;
+  camera.updateProjectionMatrix();
+}
+resize();
+window.addEventListener('resize', resize);
+applyQuality('high');
+
+function fmt(s) {
+  const m = Math.floor(s/60), sec = Math.floor(s%60);
+  return m + ':' + String(sec).padStart(2,'0');
+}
+
+function buildSphere(video, sbs) {
+  if (sphere) { scene.remove(sphere); sphere.geometry.dispose(); sphere.material.map.dispose(); sphere.material.dispose(); }
+  const p = qualityPresets[quality];
+  const tex = new THREE.VideoTexture(video);
+  tex.anisotropy = Math.min(p.aniso, renderer.capabilities.getMaxAnisotropy());
+  tex.minFilter = THREE.LinearMipmapLinearFilter;
+  tex.magFilter = THREE.LinearFilter;
+  tex.format = THREE.RGBFormat;
+  tex.generateMipmaps = true;
+  if (sbs) { tex.repeat.set(0.5, 1); tex.offset.set(0, 0); }
+  const geo = new THREE.SphereGeometry(500, p.segments, p.segments / 2);
+  geo.scale(-1, 1, 1);
+  const mat = new THREE.MeshBasicMaterial({ map: tex });
+  sphere = new THREE.Mesh(geo, mat);
+  scene.add(sphere);
+}
+
+let needsRender = false;
+let animRunning = false;
+
+function markDirty() { needsRender = true; }
+
+function renderFrame() {
+  animRunning = false;
+  if (document.hidden) return;
+
+  lat = Math.max(-85, Math.min(85, lat));
+  const phi = THREE.MathUtils.degToRad(90 - lat);
+  const theta = THREE.MathUtils.degToRad(lon);
+  camera.lookAt(
+    500 * Math.sin(phi) * Math.cos(theta),
+    500 * Math.cos(phi),
+    500 * Math.sin(phi) * Math.sin(theta)
+  );
+  renderer.render(scene, camera);
+
+  if (videoEl && videoEl.duration) {
+    const t = Math.floor(videoEl.currentTime);
+    if (t !== lastTimeSec) {
+      lastTimeSec = t;
+      progressBar.style.width = (videoEl.currentTime / videoEl.duration * 100) + '%';
+      timeLabel.textContent = fmt(videoEl.currentTime) + ' / ' + fmt(videoEl.duration);
+    }
+  }
+
+  const isPlaying = videoEl && !videoEl.paused && !videoEl.ended;
+  if (isPlaying || needsRender) {
+    needsRender = false;
+    animRunning = true;
+    requestAnimationFrame(renderFrame);
+  }
+}
+
+function scheduleRender() {
+  needsRender = true;
+  if (!animRunning) {
+    animRunning = true;
+    requestAnimationFrame(renderFrame);
+  }
+}
+scheduleRender();
+
+canvas.addEventListener('mousedown', e => { isDragging = true; lastX = e.clientX; lastY = e.clientY; });
+window.addEventListener('mouseup', () => { isDragging = false; });
+window.addEventListener('mousemove', e => {
+  if (!isDragging) return;
+  lon -= (e.clientX - lastX) * sensitivity * 0.12;
+  lat += (e.clientY - lastY) * sensitivity * 0.12;
+  lastX = e.clientX; lastY = e.clientY;
+  scheduleRender();
+});
+
+canvas.addEventListener('wheel', e => {
+  camera.fov = Math.max(20, Math.min(120, camera.fov + e.deltaY * 0.05));
+  camera.updateProjectionMatrix();
+  document.getElementById('fovSlider').value = Math.round(camera.fov);
+  document.getElementById('fovVal').textContent = Math.round(camera.fov) + '°';
+  scheduleRender();
+  e.preventDefault();
+}, { passive: false });
+
+let touchStartX=0, touchStartY=0, pinchDist=0;
+canvas.addEventListener('touchstart', e => {
+  if (e.touches.length === 1) { touchStartX=e.touches[0].clientX; touchStartY=e.touches[0].clientY; }
+  if (e.touches.length === 2) {
+    pinchDist = Math.hypot(e.touches[0].clientX-e.touches[1].clientX, e.touches[0].clientY-e.touches[1].clientY);
+  }
+}, { passive: true });
+canvas.addEventListener('touchmove', e => {
+  if (e.touches.length === 1) {
+    lon -= (e.touches[0].clientX-touchStartX)*sensitivity*0.08;
+    lat += (e.touches[0].clientY-touchStartY)*sensitivity*0.08;
+    touchStartX=e.touches[0].clientX; touchStartY=e.touches[0].clientY;
+    scheduleRender();
+  }
+  if (e.touches.length === 2) {
+    const d = Math.hypot(e.touches[0].clientX-e.touches[1].clientX, e.touches[0].clientY-e.touches[1].clientY);
+    camera.fov = Math.max(20, Math.min(120, camera.fov - (d-pinchDist)*0.1));
+    camera.updateProjectionMatrix();
+    pinchDist = d;
+    scheduleRender();
+  }
+}, { passive: true });
+
+document.getElementById('fileInput').addEventListener('change', function(e) {
+  const file = e.target.files[0]; if (!file) return;
+  if (videoEl) { videoEl.pause(); URL.revokeObjectURL(videoEl.src); }
+  videoEl = document.createElement('video');
+  videoEl.src = URL.createObjectURL(file);
+  videoEl.loop = true;
+  videoEl.playsInline = true;
+  videoEl.addEventListener('loadeddata', () => {
+    document.getElementById('hint').style.display = 'none';
+    buildSphere(videoEl, isSBS);
+    videoEl.play().then(() => {
+      document.getElementById('playBtn').textContent = '⏸ Пауза';
+      scheduleRender();
+    }).catch(()=>{});
+    document.getElementById('playBtn').disabled = false;
+  });
+  videoEl.addEventListener('play', scheduleRender);
+  videoEl.addEventListener('seeked', scheduleRender);
+});
+
+document.getElementById('playBtn').addEventListener('click', () => {
+  if (!videoEl) return;
+  if (videoEl.paused) { videoEl.play(); document.getElementById('playBtn').textContent='⏸ Пауза'; }
+  else { videoEl.pause(); document.getElementById('playBtn').textContent='▶ Играть'; }
+});
+
+document.getElementById('sbsBtn').addEventListener('click', () => {
+  isSBS = true;
+  document.getElementById('sbsBtn').classList.add('active');
+  document.getElementById('fullBtn').classList.remove('active');
+  if (videoEl && sphere) buildSphere(videoEl, true);
+});
+document.getElementById('fullBtn').addEventListener('click', () => {
+  isSBS = false;
+  document.getElementById('fullBtn').classList.add('active');
+  document.getElementById('sbsBtn').classList.remove('active');
+  if (videoEl && sphere) buildSphere(videoEl, false);
+});
+
+document.getElementById('fovSlider').addEventListener('input', function() {
+  camera.fov = +this.value; camera.updateProjectionMatrix();
+  document.getElementById('fovVal').textContent = this.value + '°';
+});
+document.getElementById('sensSlider').addEventListener('input', function() {
+  sensitivity = +this.value * 0.2;
+  document.getElementById('sensVal').textContent = this.value;
+});
+
+document.getElementById('fsBtn').addEventListener('click', () => {
+  if (!document.fullscreenElement) document.documentElement.requestFullscreen();
+  else document.exitFullscreen();
+});
+document.addEventListener('fullscreenchange', () => {
+  document.getElementById('fsBtn').textContent = document.fullscreenElement ? '✕ Выйти' : '⛶ Полный экран';
+  setTimeout(resize, 100);
+  if (!document.fullscreenElement) {
+    document.body.classList.remove('hide-ui');
+    clearTimeout(hideTimer);
+  }
+});
+
+let hideTimer = null;
+function resetHideTimer() {
+  if (!document.fullscreenElement) return;
+  document.body.classList.remove('hide-ui');
+  clearTimeout(hideTimer);
+  hideTimer = setTimeout(() => {
+    if (document.fullscreenElement) document.body.classList.add('hide-ui');
+  }, 2500);
+}
+document.addEventListener('mousemove', resetHideTimer);
+document.addEventListener('keydown', resetHideTimer);
+document.addEventListener('click', resetHideTimer);
+
+function showFlash(text) {
+  const el = document.getElementById('seekFlash');
+  el.textContent = text;
+  el.style.opacity = '1';
+  clearTimeout(el._t);
+  el._t = setTimeout(() => { el.style.opacity = '0'; }, 700);
+}
+
+function seek(delta) {
+  if (!videoEl) return;
+  videoEl.currentTime = Math.max(0, Math.min(videoEl.duration, videoEl.currentTime + delta));
+  const sign = delta > 0 ? '+' : '';
+  showFlash(sign + delta + 'с');
+}
+
+document.addEventListener('keydown', e => {
+  if (['INPUT','TEXTAREA'].includes(e.target.tagName)) return;
+  if (e.key === 'ArrowLeft')  { seek(-5);  e.preventDefault(); }
+  if (e.key === 'ArrowRight') { seek(+5);  e.preventDefault(); }
+  if (e.key === 'j' || e.key === 'J') { seek(-10); e.preventDefault(); }
+  if (e.key === 'k' || e.key === 'K') { seek(+10); e.preventDefault(); }
+  if (e.key === ' ') {
+    if (!videoEl) return;
+    if (videoEl.paused) { videoEl.play(); document.getElementById('playBtn').textContent='⏸ Пауза'; }
+    else { videoEl.pause(); document.getElementById('playBtn').textContent='▶ Играть'; }
+    e.preventDefault();
+  }
+});
+
+document.getElementById('progressWrap').addEventListener('click', function(e) {
+  if (!videoEl || !videoEl.duration) return;
+  const rect = this.getBoundingClientRect();
+  const ratio = (e.clientX - rect.left) / rect.width;
+  videoEl.currentTime = ratio * videoEl.duration;
+});
+</script>
+</body>
+</html>
